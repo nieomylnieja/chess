@@ -25,6 +25,7 @@ typedef struct {
     uint id;
     uint opponent_id;
     const char *color;
+    bool active;
     int result;
     int fd;
     char response[256];
@@ -193,12 +194,22 @@ int start_listening(int sfd) {
                             }
                         }
                         if (!c_id) {
-                            log_error("max clients exceeded!");
-                            free(msg);
-                            continue;
+                            // try to look for a free spot among disconnected clients
+                            for (uint j = 1; j < MAX_CLIENTS; j++) {
+                                if (!clients[j].active) {
+                                    c_id = j;
+                                    break;
+                                }
+                            }
+                            if (!c_id) {
+                                log_error("max clients exceeded!");
+                                free(msg);
+                                continue;
+                            }
                         }
                         clients[c_id].id = c_id;
                         clients[c_id].fd = i;
+                        clients[c_id].active = true;
                         /*
                          * lets assign the fd to awaiting
                          * it's safe to do it this way because the client will block on recv() until a match is found

@@ -16,6 +16,9 @@ test: verify
 build:
 	go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME) .
 
+build-windows:
+	env GOOS=windows go build -ldflags="-s -w" -o $(BUILD_DIR)/$(APP_NAME).exe .
+
 run:
 	env $$(cat $(APP_NAME).env.local) $(BUILD_DIR)/$(APP_NAME)
 

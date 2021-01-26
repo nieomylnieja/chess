@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,31 +16,53 @@ import (
 )
 
 const (
-	FMT         = "%s:%s"
-	END_EVENT   = "END"
-	BEGIN_EVENT = "BEGIN"
+	FMT             = "%d:%s"
+	END_EVENT       = "END"
+	BEGIN_EVENT     = "BEGIN"
+	RECONNECT_EVENT = "RECONNECT"
 )
 
 func main() {
-	c := &Client{}
-	c.setupTcpConnection()
-	c.handshake()
+	welcome()
+	c := NewClient()
+	c.terminal.Clear()
 
+	c.setupTcpConnection()
+
+	c.handshake()
 	c.newGame()
 
-	c.drawBoard()
 	var move *chess.Move
 	for c.gameInProgress() {
+		c.terminal.Clear()
+		c.drawBoard()
 		if c.color == c.game.Position().Turn() {
 			move = c.readMoveFromStdin()
 		} else {
 			move = c.readMoveFromSocket()
 		}
 		c.move(move)
-		c.drawBoard()
 	}
-	c.send(END_EVENT)
+	c.sendFmt(END_EVENT)
 	c.printOutcome()
+}
+
+type terminal interface {
+	Clear()
+}
+
+func NewClient() *Client {
+	var t terminal
+	switch runtime.GOOS {
+	case "linux":
+		t = LinuxTerminal{}
+	case "windows":
+		t = WindowsTerminal{}
+	default:
+		fmt.Println("unsupported operating system")
+		os.Exit(1)
+	}
+	return &Client{terminal: t}
 }
 
 type Client struct {
@@ -45,10 +70,13 @@ type Client struct {
 	config  tcpConfig
 	conn    *net.TCPConn
 	fdCount int
-	uuid    string
+	uuid    int
 	// chess related config
-	color chess.Color
-	game  *chess.Game
+	color    chess.Color
+	game     *chess.Game
+	lastMove *chess.Move
+	// terminal clearing
+	terminal
 }
 
 func (c *Client) move(move *chess.Move) {
@@ -56,6 +84,7 @@ func (c *Client) move(move *chess.Move) {
 		// we'll never get here but whatever...
 		log.Panicw("invalid move registered", "error", err.Error(), "invalidMove", move)
 	}
+	c.lastMove = move
 }
 
 func (c *Client) drawBoard() {
@@ -65,7 +94,10 @@ func (c *Client) drawBoard() {
 func (c *Client) readMoveFromStdin() *chess.Move {
 	// gather the new move from the user
 	reader := bufio.NewReader(os.Stdin)
-	fmt.Println("It's your turn")
+	fmt.Printf("It's your turn (%s)\n", c.color.Name())
+	if c.lastMove != nil {
+		fmt.Printf("%s's move was: %s\n", c.color.Other().Name(), c.lastMove.String())
+	}
 	fmt.Print("Type in your move: ")
 
 	var move *chess.Move
@@ -86,12 +118,12 @@ func (c *Client) readMoveFromStdin() *chess.Move {
 		break
 	}
 	// send the move to the server, we know it's valid
-	c.send(fmt.Sprintf(FMT, c.uuid, moveStr))
+	c.sendFmt(moveStr)
 	return move
 }
 
 func (c *Client) readMoveFromSocket() *chess.Move {
-	fmt.Println("It's your opponents turn")
+	fmt.Printf("It's your opponents turn (%s)\n", c.color.Other().Name())
 	msg := c.recv()
 	move, err := chess.AlgebraicNotation{}.Decode(c.game.Position(), msg)
 	if err != nil {
@@ -117,6 +149,10 @@ func (c *Client) printOutcome() {
 	} else {
 		fmt.Printf("You've lost!\n%s has won the game.\n", c.color.Other().Name())
 	}
+}
+
+func (c *Client) promptToContinue() bool {
+	return true
 }
 
 func (c *Client) newGame() {
@@ -152,6 +188,7 @@ func (c *Client) dial(noWait bool) {
 			if err = dialer(); err == nil {
 				c.fdCount += 2
 				log.Info("successfully connected")
+				c.sendFmt(RECONNECT_EVENT)
 				return
 			}
 		}
@@ -167,6 +204,10 @@ func (c *Client) recv() string {
 	msg := string(p[:n])
 	log.Debugw("successfully read response message", "msg", msg)
 	return msg
+}
+
+func (c *Client) sendFmt(msg string) {
+	c.send(fmt.Sprintf(FMT, c.uuid, msg))
 }
 
 func (c *Client) send(msg string) {
@@ -195,13 +236,14 @@ func (c *Client) handshake() {
 	c.send(BEGIN_EVENT)
 	msg := c.recv()
 	s := strings.Split(strings.TrimSpace(msg), ":")
-	c.uuid = s[0]
+	// let's just assume the server hasn't gone crazy here
+	c.uuid, _ = strconv.Atoi(s[0])
 	if s[1] == "WHITE" {
 		c.color = chess.White
 	} else {
 		c.color = chess.Black
 	}
-	fmt.Printf("I got my uuid: %s and color: %s!\n", c.uuid, c.color.Name())
+	fmt.Printf("I got my uuid: %d and color: %s!\n", c.uuid, c.color.Name())
 }
 
 type tcpConfig struct {
@@ -219,4 +261,52 @@ func (t tcpConfig) getAddress() string {
 
 func (t tcpConfig) String() string {
 	return fmt.Sprintf("network: '%s', address: '%s'", t.Network, t.getAddress())
+}
+
+type LinuxTerminal struct {
+}
+
+func (t LinuxTerminal) Clear() {
+	cmd := exec.Command("clear")
+	cmd.Stdout = os.Stdout
+	_ = cmd.Run()
+}
+
+type WindowsTerminal struct {
+}
+
+func (t WindowsTerminal) Clear() {
+	cmd := exec.Command("cmd", "/c", "cls")
+	cmd.Stdout = os.Stdout
+	_ = cmd.Run()
+}
+
+func welcome() {
+	fmt.Print("Welcome to this simple chess client!\n\n")
+	fmt.Print("Do you want to setup the connection details? This includes host and port address? [y/n]: ")
+	s, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	s = strings.TrimSpace(s)
+	if s == "y" {
+		// let's just ignore those errors, If the user gives us rubbish, he won't be able to connect anyway...
+		fmt.Print("Please type in host name: ")
+		host, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		host = strings.TrimSpace(host)
+		_ = os.Setenv("SERVER_HOST", host)
+		fmt.Print("Please type in host port: ")
+		port, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		port = strings.TrimSpace(port)
+		_ = os.Setenv("SERVER_PORT", port)
+		fmt.Printf("server address set to: %s:%s\n", host, port)
+	}
+	fmt.Printf(`
+
+A few rules to keep in mind:
+ - moves should be entered in algebraic notation
+ - white is playing on top and black on the bottom...
+ - this program is fairly simple, be ware of wild errors!
+
+If you're ready to begin, simply press [ENTER]
+`)
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	fmt.Println("The server is finding a worthy opponent for you right now!")
 }
