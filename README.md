@@ -1,4 +1,4 @@
-#Chess client/server over TCP sockets
+# Chess client/server over TCP sockets
 
 This is a simple implementation of a `TCP` server/client model listening for chess clients, pairing the games and managing existing client connections and running games.
 
